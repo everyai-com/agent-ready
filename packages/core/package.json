@@ -1,0 +1,29 @@
+{
+  "name": "@agent-ready/core",
+  "version": "0.1.0",
+  "description": "Core of agent-ready: the capability manifest spec, validation, redaction, tool derivation, and the backend-adapter interface.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./manifest.schema.json": "./src/manifest.schema.json"
+  },
+  "files": [
+    "dist",
+    "src/manifest.schema.json"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

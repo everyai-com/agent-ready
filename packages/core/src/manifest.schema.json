@@ -1,0 +1,94 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://agent-ready.dev/schemas/manifest/v0.json",
+  "title": "agent-ready capability manifest (v0)",
+  "description": "The single source of truth describing what AI agents may do with an app: its resources (nouns), their fields, and the capabilities (verbs) enabled per resource.",
+  "type": "object",
+  "required": ["version", "app", "resources", "capabilities"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "const": "v0",
+      "description": "Manifest spec version."
+    },
+    "app": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "backend": { "type": "string" }
+      }
+    },
+    "resources": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/resource" }
+    },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": { "$ref": "#/definitions/capability" }
+      }
+    }
+  },
+  "definitions": {
+    "fieldType": {
+      "enum": ["string", "number", "boolean", "datetime", "json", "unknown"]
+    },
+    "verb": {
+      "enum": ["read", "list", "create", "update"]
+    },
+    "field": {
+      "type": "object",
+      "required": ["name", "type"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "type": { "$ref": "#/definitions/fieldType" },
+        "sensitive": { "type": "boolean" }
+      }
+    },
+    "resource": {
+      "type": "object",
+      "required": ["name", "fields"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "label": { "type": "string" },
+        "description": { "type": "string" },
+        "approximateRows": { "type": "number", "minimum": 0 },
+        "fields": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/field" }
+        }
+      }
+    },
+    "guardrails": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxRowsPerCall": { "type": "number", "minimum": 1 },
+        "rateLimitPerMinute": { "type": "number", "minimum": 1 },
+        "requiresConfirmation": { "type": "boolean" }
+      }
+    },
+    "capability": {
+      "type": "object",
+      "required": ["verb", "enabled", "exposedFields"],
+      "additionalProperties": false,
+      "properties": {
+        "verb": { "$ref": "#/definitions/verb" },
+        "enabled": { "type": "boolean" },
+        "exposedFields": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "locked": { "type": "boolean" },
+        "guardrails": { "$ref": "#/definitions/guardrails" }
+      }
+    }
+  }
+}

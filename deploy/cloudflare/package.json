@@ -1,0 +1,22 @@
+{
+  "name": "agent-ready-cloudflare-gateway",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Deploy-to-Cloudflare template: a Worker that serves your agent-ready MCP gateway from your own Supabase project.",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@agent-ready/core": "^0.1.0",
+    "@agent-ready/surface-mcp": "^0.1.0",
+    "@agent-ready/adapter-supabase": "^0.1.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241106.0",
+    "typescript": "^5.6.0",
+    "wrangler": "^3.90.0"
+  }
+}

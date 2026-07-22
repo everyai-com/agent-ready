@@ -1,0 +1,18 @@
+{
+  "name": "agent-ready",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Make your product AI-agent ready. Turn any app backend into an MCP server, API, and CLI — one click, safe by default.",
+  "license": "Apache-2.0",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
