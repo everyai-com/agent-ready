@@ -89,3 +89,75 @@ describe("deriveTools", () => {
     expect(list.verb).toBe("list");
   });
 });
+
+describe("deriveTools outputSchema", () => {
+  const tools = deriveTools(manifest);
+
+  it("shapes list output as rows/total/truncated over exposed fields", () => {
+    const list = tools.find((t) => t.name === "list_plants")!;
+    expect(list.outputSchema.type).toBe("object");
+    expect(list.outputSchema.required).toEqual(["rows"]);
+    const rows = list.outputSchema.properties.rows as {
+      type: string;
+      items: { properties: Record<string, unknown>; required: string[] };
+    };
+    expect(rows.type).toBe("array");
+    expect(Object.keys(rows.items.properties)).toEqual(["id", "name", "price"]);
+    expect(rows.items.properties.price).toEqual({ type: "number" });
+    expect(list.outputSchema.properties.total).toEqual({ type: "number" });
+    expect(list.outputSchema.properties.truncated).toEqual({ type: "boolean" });
+  });
+
+  it("shapes read output as the exposed fields directly", () => {
+    const read = tools.find((t) => t.name === "get_plants")!;
+    expect(Object.keys(read.outputSchema.properties)).toEqual(["id", "name"]);
+    expect(read.outputSchema.required).toEqual(["id", "name"]);
+  });
+
+  it("shapes create/update output as { ok, row }", () => {
+    const create = tools.find((t) => t.name === "create_orders")!;
+    expect(Object.keys(create.outputSchema.properties)).toEqual(["ok", "row"]);
+    expect(create.outputSchema.required).toEqual(["ok"]);
+    const row = create.outputSchema.properties.row as {
+      properties: Record<string, unknown>;
+    };
+    expect(Object.keys(row.properties)).toEqual(["total"]);
+
+    const update = tools.find((t) => t.name === "update_orders")!;
+    expect(Object.keys(update.outputSchema.properties)).toEqual(["ok", "row"]);
+  });
+
+  it("maps datetime fields to string with date-time format", () => {
+    const m = {
+      ...manifest,
+      resources: [
+        {
+          name: "events",
+          fields: [
+            { name: "id", type: "string" as const },
+            { name: "startsAt", type: "datetime" as const },
+            { name: "meta", type: "json" as const },
+          ],
+        },
+      ],
+      capabilities: {
+        events: [
+          {
+            verb: "list" as const,
+            enabled: true,
+            exposedFields: ["id", "startsAt", "meta"],
+          },
+        ],
+      },
+    };
+    const [listEvents] = deriveTools(m);
+    const rows = listEvents.outputSchema.properties.rows as {
+      items: { properties: Record<string, unknown> };
+    };
+    expect(rows.items.properties.startsAt).toEqual({
+      type: "string",
+      format: "date-time",
+    });
+    expect(rows.items.properties.meta).toEqual({ type: "object" });
+  });
+});

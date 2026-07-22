@@ -10,3 +10,4 @@ export type {
   ToolDefinition,
   ToolResult,
 } from '@agent-ready/core';
+export { toolRequiresConfirmation } from '@agent-ready/core';

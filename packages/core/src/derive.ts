@@ -29,6 +29,104 @@ function jsonType(field: Field): string {
   }
 }
 
+/** Map a manifest field type to a JSON-Schema property fragment for output. */
+function jsonSchemaProperty(field: Field): Record<string, unknown> {
+  switch (field.type) {
+    case "number":
+      return { type: "number" };
+    case "boolean":
+      return { type: "boolean" };
+    case "json":
+      return { type: "object" };
+    case "datetime":
+      return { type: "string", format: "date-time" };
+    case "string":
+      return { type: "string" };
+    default:
+      return {};
+  }
+}
+
+/** Build the `{ [field]: schema }` properties object for a set of exposed fields. */
+function exposedFieldProperties(
+  capability: Capability,
+  resource: Resource,
+): { properties: Record<string, unknown>; required: string[] } {
+  const fieldByName = new Map(resource.fields.map((f) => [f.name, f]));
+  const properties: Record<string, unknown> = {};
+  const required: string[] = [];
+  for (const name of capability.exposedFields) {
+    const field = fieldByName.get(name);
+    if (!field) continue;
+    properties[name] = jsonSchemaProperty(field);
+    required.push(name);
+  }
+  return { properties, required };
+}
+
+/** Build the JSON-Schema output for a tool from its capability + resource. */
+function buildOutputSchema(
+  capability: Capability,
+  resource: Resource,
+): JsonSchema {
+  if (capability.verb === "list") {
+    const { properties: rowProperties, required } = exposedFieldProperties(
+      capability,
+      resource,
+    );
+    const rowSchema = {
+      type: "object",
+      properties: rowProperties,
+      required,
+      additionalProperties: false,
+    };
+    return {
+      type: "object",
+      properties: {
+        rows: { type: "array", items: rowSchema },
+        total: { type: "number" },
+        truncated: { type: "boolean" },
+      },
+      required: ["rows"],
+      additionalProperties: false,
+    };
+  }
+
+  if (capability.verb === "read") {
+    const { properties, required } = exposedFieldProperties(
+      capability,
+      resource,
+    );
+    return {
+      type: "object",
+      properties,
+      required,
+      additionalProperties: false,
+    };
+  }
+
+  // create / update: a write-acknowledgement shape.
+  const { properties: rowProperties, required } = exposedFieldProperties(
+    capability,
+    resource,
+  );
+  const rowSchema = {
+    type: "object",
+    properties: rowProperties,
+    required,
+    additionalProperties: false,
+  };
+  return {
+    type: "object",
+    properties: {
+      ok: { type: "boolean" },
+      row: rowSchema,
+    },
+    required: ["ok"],
+    additionalProperties: false,
+  };
+}
+
 /** `list` → `list_plants`, `create` → `create_order`, etc. */
 export function toolName(verb: CapabilityVerb, resource: string): string {
   const verbPrefix = verb === "read" ? "get" : verb;
@@ -133,6 +231,7 @@ export function deriveTools(manifest: Manifest): ToolDefinition[] {
         name: toolName(capability.verb, resource.name),
         description: describe(capability.verb, res),
         inputSchema: buildInputSchema(capability, res),
+        outputSchema: buildOutputSchema(capability, res),
         resource: resource.name,
         verb: capability.verb,
       });

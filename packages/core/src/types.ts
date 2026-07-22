@@ -168,6 +168,13 @@ export interface ToolCall {
 export interface Identity {
   /** Opaque id for the acting agent/key, used for audit + rate limiting. */
   agentId?: string;
+  /**
+   * Internal marker: true only when a surface handler has independently
+   * verified a confirmation token for this call (see `confirm.ts`). Never
+   * set from agent-supplied tool input — setting it is what lets
+   * `executeWithConfirmation` proceed past a `requiresConfirmation` gate.
+   */
+  confirmed?: boolean;
 }
 
 /** The result of executing a tool call. */
@@ -175,6 +182,10 @@ export interface ToolResult {
   ok: boolean;
   /** Redacted rows for read/list, or the affected row(s) for create/update. */
   rows?: Array<Record<string, unknown>>;
+  /** Total matching row count for `list`, when known (may exceed `rows.length`). */
+  total?: number;
+  /** True when `rows` was capped below the total available (`list` only). */
+  truncated?: boolean;
   /** Human-readable error when `ok` is false. */
   error?: string;
 }
@@ -214,6 +225,13 @@ export interface ToolDefinition {
   description: string;
   /** JSON Schema describing the tool's input. */
   inputSchema: JsonSchema;
+  /**
+   * JSON Schema describing the tool's output shape. Additive: `list`/`read`
+   * results shape the exposed fields; `create`/`update` describe the
+   * `{ ok, row? }` write-acknowledgement shape. Hosts and surfaces can rely
+   * on this to render results without guessing the payload shape.
+   */
+  outputSchema: JsonSchema;
   /** The resource/verb this tool maps back to, for the executor. */
   resource: string;
   verb: CapabilityVerb;

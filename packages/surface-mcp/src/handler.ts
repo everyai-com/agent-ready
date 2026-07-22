@@ -1,15 +1,20 @@
 import {
+  ConfirmationGate,
   deriveTools as coreDeriveTools,
+  executeWithConfirmation,
+  toolRequiresConfirmation,
   type BackendAdapter,
   type Identity,
   type Manifest,
   type ToolDefinition,
   type ToolResult,
 } from '@agent-ready/core';
+import { buildStructuredContent, renderResultMarkdown } from '@agent-ready/surface-ui';
 
 const PROTOCOL_VERSION = '2025-03-26';
 const SERVER_NAME = 'agent-ready-gateway';
 const SERVER_VERSION = '0.1.0';
+const CONFIRM_PREFIX = 'confirm_';
 
 export interface CreateMcpHandlerOptions {
   manifest: Manifest;
@@ -26,6 +31,13 @@ export interface CreateMcpHandlerOptions {
    * implementation exported by core. Injectable primarily for tests.
    */
   deriveTools?: (manifest: Manifest) => ToolDefinition[];
+  /**
+   * HMAC secret for signing confirmation tokens (see docs/confirmations.md).
+   * Falls back to a random per-instance secret, which is fine for a single
+   * Worker isolate but means tokens do not verify across isolates/restarts —
+   * pass a stable Worker secret for multi-isolate deployments.
+   */
+  confirmSecret?: string;
 }
 
 interface JsonRpcRequest {
@@ -75,6 +87,15 @@ function rpcResult(id: string | number | null, result: unknown): JsonRpcSuccess 
   return { jsonrpc: '2.0', id, result };
 }
 
+function errorResult(id: string | number | null, text: string) {
+  return jsonResponse(
+    rpcResult(id, {
+      content: [{ type: 'text', text }],
+      isError: true,
+    }),
+  );
+}
+
 /**
  * The MCP `tools/list` wire shape: only the agent-facing fields. Core's
  * `ToolDefinition` additionally carries `resource`/`verb` for the executor;
@@ -84,6 +105,7 @@ interface McpToolSchema {
   name: string;
   description: string;
   inputSchema: ToolDefinition['inputSchema'];
+  outputSchema: ToolDefinition['outputSchema'];
 }
 
 function toWireTool(tool: ToolDefinition): McpToolSchema {
@@ -91,7 +113,38 @@ function toWireTool(tool: ToolDefinition): McpToolSchema {
     name: tool.name,
     description: tool.description,
     inputSchema: tool.inputSchema,
+    outputSchema: tool.outputSchema,
   };
+}
+
+/** The synthetic `confirm_<tool>` tool def for a confirmation-required capability. */
+function confirmToolFor(tool: ToolDefinition): McpToolSchema {
+  return {
+    name: `${CONFIRM_PREFIX}${tool.name}`,
+    description: `Confirm and execute the pending "${tool.name}" call from a confirmation token returned by ${tool.name}.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        confirmationToken: {
+          type: 'string',
+          description: 'The confirmationToken returned by the preview call.',
+        },
+      },
+      required: ['confirmationToken'],
+      additionalProperties: false,
+    },
+    outputSchema: tool.outputSchema,
+  };
+}
+
+/** Human, boring, unambiguous preview text for a pending write (host-ui-plan §2.2.3). */
+function renderPreviewMarkdown(tool: ToolDefinition, input: Record<string, unknown>): string {
+  const verbLabel = tool.verb === 'create' ? 'create' : 'update';
+  const values = (input.values ?? {}) as Record<string, unknown>;
+  const fieldLines = Object.entries(values).map(([k, v]) => `- **${k}:** ${JSON.stringify(v)}`);
+  const idLine = tool.verb === 'update' && input.id ? `\n- **id:** ${JSON.stringify(input.id)}` : '';
+  const fields = fieldLines.length > 0 ? `\n${fieldLines.join('\n')}${idLine}` : '';
+  return `You are about to ${verbLabel} a **${tool.resource}** record:${fields}\n\nCall \`${CONFIRM_PREFIX}${tool.name}\` with the \`confirmationToken\` below to proceed. This does not execute until confirmed.`;
 }
 
 /**
@@ -110,12 +163,18 @@ function toWireTool(tool: ToolDefinition): McpToolSchema {
  * particular have no `node:http` and awkward support for long-lived SDK
  * transports). If a future need arises for resources/prompts/sampling or
  * SSE streaming, revisit adopting the SDK's server class directly.
+ *
+ * Confirmation gate: `requiresConfirmation` capabilities never execute on
+ * the first `tools/call` — see docs/confirmations.md. The gate itself
+ * (`executeWithConfirmation`) lives in `@agent-ready/core` so this surface
+ * and `@agent-ready/console` share exactly one enforcement path.
  */
 export function createMcpHandler(
   options: CreateMcpHandlerOptions,
 ): (request: Request) => Promise<Response> {
   const { manifest, adapter, apiKeys } = options;
   const deriveTools = options.deriveTools ?? coreDeriveTools;
+  const gate = new ConfirmationGate(options.confirmSecret);
 
   function authenticate(request: Request): { ok: true; identity?: Identity } | { ok: false } {
     if (!apiKeys || apiKeys.length === 0) return { ok: true };
@@ -184,8 +243,15 @@ export function createMcpHandler(
         }
 
         case 'tools/list': {
-          const tools = deriveTools(manifest).map(toWireTool);
-          return jsonResponse(rpcResult(id, { tools }));
+          const tools = deriveTools(manifest);
+          const wireTools: McpToolSchema[] = [];
+          for (const tool of tools) {
+            wireTools.push(toWireTool(tool));
+            if (toolRequiresConfirmation(manifest, tool.resource, tool.verb)) {
+              wireTools.push(confirmToolFor(tool));
+            }
+          }
+          return jsonResponse(rpcResult(id, { tools: wireTools }));
         }
 
         case 'tools/call': {
@@ -194,53 +260,85 @@ export function createMcpHandler(
           if (!toolName || typeof toolName !== 'string') {
             return jsonResponse(rpcError(id, ErrorCodes.INVALID_PARAMS, 'Missing required param: name'));
           }
+          const args = (params.arguments ?? {}) as Record<string, unknown>;
+
+          const tools = deriveTools(manifest);
+
+          // --- confirm_<tool>: verify token, then execute the ORIGINAL call ---
+          if (toolName.startsWith(CONFIRM_PREFIX)) {
+            const baseName = toolName.slice(CONFIRM_PREFIX.length);
+            const baseTool = tools.find((t) => t.name === baseName);
+            if (!baseTool || !toolRequiresConfirmation(manifest, baseTool.resource, baseTool.verb)) {
+              return errorResult(id, `Unknown or disabled tool: ${toolName}`);
+            }
+            const token = args.confirmationToken;
+            if (typeof token !== 'string' || token.length === 0) {
+              return errorResult(id, 'Missing required argument: confirmationToken');
+            }
+            const verified = await gate.verify(token, baseTool.name);
+            if (!verified.ok) {
+              return errorResult(id, `Could not complete ${baseTool.name}: ${verified.error}`);
+            }
+
+            try {
+              const result: ToolResult = await executeWithConfirmation(
+                adapter,
+                baseTool,
+                { resource: baseTool.resource, verb: baseTool.verb, input: verified.input },
+                manifest,
+                { ...identity, confirmed: true },
+              );
+              return jsonResponse(
+                rpcResult(id, {
+                  content: [{ type: 'text', text: renderResultMarkdown(baseTool, result) }],
+                  structuredContent: buildStructuredContent(baseTool, result),
+                  isError: !result.ok,
+                }),
+              );
+            } catch (err) {
+              const message = err instanceof Error ? err.message : String(err);
+              return errorResult(id, `Tool call failed: ${message}`);
+            }
+          }
 
           // Only tools derived from *enabled* capabilities exist here, so an
           // unknown name is either a typo or a disabled/locked capability —
           // either way it is refused before any adapter call is made.
-          const tools = deriveTools(manifest);
           const tool = tools.find((t) => t.name === toolName);
           if (!tool) {
+            return errorResult(id, `Unknown or disabled tool: ${toolName}`);
+          }
+
+          // --- write requiring confirmation: preview only, never execute ---
+          if (toolRequiresConfirmation(manifest, tool.resource, tool.verb)) {
+            const token = await gate.issueToken(tool.name, args);
             return jsonResponse(
               rpcResult(id, {
-                content: [{ type: 'text', text: `Unknown or disabled tool: ${toolName}` }],
-                isError: true,
+                content: [{ type: 'text', text: renderPreviewMarkdown(tool, args) }],
+                structuredContent: { preview: args, confirmationToken: token },
+                isError: false,
               }),
             );
           }
 
           try {
-            const result: ToolResult = await adapter.execute(
-              {
-                resource: tool.resource,
-                verb: tool.verb,
-                input: (params.arguments ?? {}) as Record<string, unknown>,
-              },
+            const result: ToolResult = await executeWithConfirmation(
+              adapter,
+              tool,
+              { resource: tool.resource, verb: tool.verb, input: args },
               manifest,
               identity,
             );
-            if (!result.ok) {
-              return jsonResponse(
-                rpcResult(id, {
-                  content: [{ type: 'text', text: `Tool call failed: ${result.error ?? 'unknown error'}` }],
-                  isError: true,
-                }),
-              );
-            }
             return jsonResponse(
               rpcResult(id, {
-                content: [{ type: 'text', text: JSON.stringify(result.rows ?? []) }],
-                isError: false,
+                content: [{ type: 'text', text: renderResultMarkdown(tool, result) }],
+                structuredContent: buildStructuredContent(tool, result),
+                isError: !result.ok,
               }),
             );
           } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
-            return jsonResponse(
-              rpcResult(id, {
-                content: [{ type: 'text', text: `Tool call failed: ${message}` }],
-                isError: true,
-              }),
-            );
+            return errorResult(id, `Tool call failed: ${message}`);
           }
         }
 

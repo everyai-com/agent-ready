@@ -1,7 +1,7 @@
 {
-  "name": "@agent-ready/surface-mcp",
+  "name": "@agent-ready/surface-ui",
   "version": "0.1.0",
-  "description": "Framework-agnostic remote MCP server (Streamable HTTP / JSON-RPC 2.0) generated from an agent-ready capability manifest.",
+  "description": "Turns a capability manifest tool result into per-host renderings: markdown, structured content, and self-contained HTML components.",
   "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",
@@ -12,17 +12,14 @@
       "default": "./dist/index.js"
     }
   },
-  "files": [
-    "dist"
-  ],
+  "files": ["dist"],
   "scripts": {
     "build": "tsc -b tsconfig.json",
     "typecheck": "tsc -b tsconfig.json",
     "test": "vitest run"
   },
   "dependencies": {
-    "@agent-ready/core": "^0.1.0",
-    "@agent-ready/surface-ui": "^0.1.0"
+    "@agent-ready/core": "0.1.0"
   },
   "devDependencies": {
     "typescript": "^5.6.0",

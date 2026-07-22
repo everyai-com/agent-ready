@@ -12,6 +12,7 @@
   "dependencies": {
     "@agent-ready/core": "^0.1.0",
     "@agent-ready/surface-mcp": "^0.1.0",
+    "@agent-ready/console": "^0.1.0",
     "@agent-ready/adapter-supabase": "^0.1.0"
   },
   "devDependencies": {

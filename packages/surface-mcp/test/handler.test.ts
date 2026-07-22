@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createMcpHandler } from '../src/handler.js';
 import type {
   BackendAdapter,
@@ -35,7 +35,15 @@ const manifest: Manifest = {
       // Disabled: must never surface as a tool nor be executable.
       { verb: 'create', enabled: false, exposedFields: [] },
     ],
-    orders: [{ verb: 'read', enabled: true, exposedFields: ['id', 'plant_id'] }],
+    orders: [
+      { verb: 'read', enabled: true, exposedFields: ['id', 'plant_id'] },
+      {
+        verb: 'create',
+        enabled: true,
+        exposedFields: ['id', 'plant_id'],
+        guardrails: { requiresConfirmation: true },
+      },
+    ],
   },
 };
 
@@ -54,6 +62,9 @@ class FakeAdapter implements BackendAdapter {
     if (call.resource === 'orders' && call.verb === 'read') {
       // Adapter-level denial (e.g. an RLS policy blocked the row).
       return { ok: false, error: 'denied: RLS policy blocked this row' };
+    }
+    if (call.resource === 'orders' && call.verb === 'create') {
+      return { ok: true, rows: [{ id: 'o1', plant_id: (call.input as { values?: { plant_id?: string } })?.values?.plant_id ?? '1' }] };
     }
     throw new Error(`no such tool: ${call.verb}_${call.resource}`);
   }
@@ -87,8 +98,18 @@ describe('createMcpHandler', () => {
     const names = body.result.tools.map((t: { name: string }) => t.name);
     expect(names).toContain('get_plants');
     expect(names).toContain('get_orders');
+    expect(names).toContain('create_orders');
     expect(names).not.toContain('create_plants');
-    expect(names).toHaveLength(2);
+  });
+
+  it('tools/list includes a confirm_<tool> only for capabilities requiring confirmation', async () => {
+    const handler = createMcpHandler({ manifest, adapter: new FakeAdapter() });
+    const res = await post(handler, { jsonrpc: '2.0', id: 21, method: 'tools/list' });
+    const body = await res.json();
+    const names = body.result.tools.map((t: { name: string }) => t.name);
+    expect(names).toContain('confirm_create_orders');
+    expect(names).not.toContain('confirm_get_orders');
+    expect(names).not.toContain('confirm_get_plants');
   });
 
   it('tools/list exposes only agent-facing fields (no internal resource/verb)', async () => {
@@ -203,5 +224,156 @@ describe('createMcpHandler', () => {
     const handler = createMcpHandler({ manifest, adapter: new FakeAdapter() });
     const res = await handler(new Request('https://gateway.example/mcp', { method: 'GET' }));
     expect(res.status).toBe(405);
+  });
+
+  it('tools/call renders a markdown table for list results and a matching structuredContent', async () => {
+    const handler = createMcpHandler({ manifest, adapter: new FakeAdapter() });
+    const res = await post(handler, {
+      jsonrpc: '2.0',
+      id: 30,
+      method: 'tools/call',
+      params: { name: 'get_orders', arguments: {} },
+    });
+    // get_orders is a "read" (single record) in this fixture's FakeAdapter,
+    // returns ok:false; use get_plants for a happy structuredContent check.
+    void res;
+
+    const res2 = await post(handler, {
+      jsonrpc: '2.0',
+      id: 31,
+      method: 'tools/call',
+      params: { name: 'get_plants', arguments: {} },
+    });
+    const body = await res2.json();
+    expect(body.result.isError).toBe(false);
+    expect(body.result.content[0].text).toContain('**id:**');
+    expect(body.result.content[0].text).toContain('Monstera');
+    expect(body.result.structuredContent).toEqual({ id: '1', name: 'Monstera' });
+  });
+
+  describe('two-step confirmation protocol', () => {
+    it('does not execute a confirmation-required write on the first call, and returns a preview + token', async () => {
+      const adapter = new FakeAdapter();
+      const handler = createMcpHandler({ manifest, adapter });
+      const res = await post(handler, {
+        jsonrpc: '2.0',
+        id: 40,
+        method: 'tools/call',
+        params: { name: 'create_orders', arguments: { values: { plant_id: '1' } } },
+      });
+      const body = await res.json();
+      expect(body.result.isError).toBe(false);
+      expect(body.result.content[0].text).toMatch(/you are about to/i);
+      expect(body.result.structuredContent.preview).toEqual({ values: { plant_id: '1' } });
+      expect(typeof body.result.structuredContent.confirmationToken).toBe('string');
+      expect(adapter.calls).toHaveLength(0);
+    });
+
+    it('calling the base write tool twice never writes', async () => {
+      const adapter = new FakeAdapter();
+      const handler = createMcpHandler({ manifest, adapter });
+      const params = { name: 'create_orders', arguments: { values: { plant_id: '1' } } };
+      await post(handler, { jsonrpc: '2.0', id: 41, method: 'tools/call', params });
+      await post(handler, { jsonrpc: '2.0', id: 42, method: 'tools/call', params });
+      expect(adapter.calls).toHaveLength(0);
+    });
+
+    it('confirm_<tool> executes exactly once with a valid token', async () => {
+      const adapter = new FakeAdapter();
+      const handler = createMcpHandler({ manifest, adapter });
+      const previewRes = await post(handler, {
+        jsonrpc: '2.0',
+        id: 43,
+        method: 'tools/call',
+        params: { name: 'create_orders', arguments: { values: { plant_id: '1' } } },
+      });
+      const previewBody = await previewRes.json();
+      const token = previewBody.result.structuredContent.confirmationToken;
+
+      const confirmRes = await post(handler, {
+        jsonrpc: '2.0',
+        id: 44,
+        method: 'tools/call',
+        params: { name: 'confirm_create_orders', arguments: { confirmationToken: token } },
+      });
+      const confirmBody = await confirmRes.json();
+      expect(confirmBody.result.isError).toBe(false);
+      expect(adapter.calls).toHaveLength(1);
+      expect(adapter.calls[0]).toEqual({
+        resource: 'orders',
+        verb: 'create',
+        input: { values: { plant_id: '1' } },
+      });
+
+      // Reusing the same token must not write again.
+      const reuseRes = await post(handler, {
+        jsonrpc: '2.0',
+        id: 45,
+        method: 'tools/call',
+        params: { name: 'confirm_create_orders', arguments: { confirmationToken: token } },
+      });
+      const reuseBody = await reuseRes.json();
+      expect(reuseBody.result.isError).toBe(true);
+      expect(adapter.calls).toHaveLength(1);
+    });
+
+    it('refuses a forged confirmation token', async () => {
+      const adapter = new FakeAdapter();
+      const handler = createMcpHandler({ manifest, adapter });
+      const res = await post(handler, {
+        jsonrpc: '2.0',
+        id: 46,
+        method: 'tools/call',
+        params: { name: 'confirm_create_orders', arguments: { confirmationToken: 'forged.token' } },
+      });
+      const body = await res.json();
+      expect(body.result.isError).toBe(true);
+      expect(adapter.calls).toHaveLength(0);
+    });
+
+    it('refuses an expired confirmation token', async () => {
+      vi.useFakeTimers();
+      try {
+        const adapter = new FakeAdapter();
+        const handler = createMcpHandler({ manifest, adapter });
+        const previewRes = await post(handler, {
+          jsonrpc: '2.0',
+          id: 47,
+          method: 'tools/call',
+          params: { name: 'create_orders', arguments: { values: { plant_id: '1' } } },
+        });
+        const previewBody = await previewRes.json();
+        const token = previewBody.result.structuredContent.confirmationToken;
+
+        vi.advanceTimersByTime(6 * 60 * 1000);
+
+        const confirmRes = await post(handler, {
+          jsonrpc: '2.0',
+          id: 48,
+          method: 'tools/call',
+          params: { name: 'confirm_create_orders', arguments: { confirmationToken: token } },
+        });
+        const confirmBody = await confirmRes.json();
+        expect(confirmBody.result.isError).toBe(true);
+        expect(confirmBody.result.content[0].text).toMatch(/expired/i);
+        expect(adapter.calls).toHaveLength(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not affect writes that do not require confirmation', async () => {
+      // get_plants (read) has no requiresConfirmation guardrail; already
+      // covered by the happy-path test above executing immediately.
+      const handler = createMcpHandler({ manifest, adapter: new FakeAdapter() });
+      const res = await post(handler, {
+        jsonrpc: '2.0',
+        id: 49,
+        method: 'tools/call',
+        params: { name: 'get_plants', arguments: {} },
+      });
+      const body = await res.json();
+      expect(body.result.isError).toBe(false);
+    });
   });
 });

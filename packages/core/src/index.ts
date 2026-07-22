@@ -14,3 +14,8 @@ export {
   isSensitiveField,
 } from "./draft.js";
 export { deriveTools, toolName } from "./derive.js";
+export {
+  ConfirmationGate,
+  executeWithConfirmation,
+  toolRequiresConfirmation,
+} from "./confirm.js";

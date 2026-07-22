@@ -8,7 +8,13 @@ Cloudflare's secret store — it never touches agent-ready's infrastructure.
 
 ## What this deploys
 
-- `GET /` — a landing page confirming the gateway is live and how to connect to it.
+- `GET /` — the **Gateway Console**: a live capability sheet ("agents can browse
+  Plants, but Users is locked"), connect snippets for Claude/Claude Code/generic
+  MCP clients, and a Playground to try each tool with a real form and see the
+  actual result (or denial) before an agent ever calls it. Owner-authed — see
+  below.
+- `GET/POST /api/console/*` — the console's own backend (manifest-view, tools,
+  run). Same owner auth as `/`.
 - `GET /health` — a JSON health check.
 - `POST /mcp` — the MCP server (Streamable HTTP / JSON-RPC 2.0), generated from
   `manifest.json` and backed by your Supabase project via `SupabaseAdapter`.
@@ -40,6 +46,11 @@ npx wrangler secret put SUPABASE_SERVICE_KEY
 # Optional: require a bearer token on /mcp. Comma-separate multiple keys to
 # issue distinct tokens per agent.
 npx wrangler secret put GATEWAY_API_KEY
+
+# Required to turn on the Gateway Console at "/". Without this secret, "/"
+# and "/api/console/*" serve a static "console disabled" page/403 — never a
+# silently-open admin surface.
+npx wrangler secret put CONSOLE_PASSWORD
 ```
 
 Deploy:
@@ -63,12 +74,27 @@ Wrangler reads secrets for local dev from `.dev.vars` (gitignored). Create one:
 SUPABASE_URL=https://xxxx.supabase.co
 SUPABASE_SERVICE_KEY=eyJ...
 GATEWAY_API_KEY=dev-key-123
+CONSOLE_PASSWORD=dev-console-pw
 ```
 
 ## Connecting an agent
 
 Point any MCP-compatible client (Claude, Claude Code, etc.) at `<your-worker-url>/mcp`.
-If `GATEWAY_API_KEY` is set, send it as `Authorization: Bearer <key>`.
+If `GATEWAY_API_KEY` is set, send it as `Authorization: Bearer <key>`. The Console's
+Overview tab has copy-paste snippets for this once it's deployed.
+
+## The Gateway Console
+
+Visit `<your-worker-url>/` and sign in with `CONSOLE_PASSWORD` to get:
+
+- **Overview** — the capability sheet in plain language (what's on, what's locked
+  and why), plus ready-made connect snippets.
+- **Playground** — pick a tool, fill in a generated form, run it, and see the
+  result as a table (or the exact denial an agent would get) — through the same
+  `adapter.execute()` path and manifest checks agents use, no privileged shortcut.
+
+No `CONSOLE_PASSWORD` set => `/` shows a static "console disabled" page and
+`/api/console/*` returns 403 — the console is opt-in, never silently open.
 
 ## Safety notes
 
@@ -79,3 +105,6 @@ If `GATEWAY_API_KEY` is set, send it as `Authorization: Bearer <key>`.
   gateway.
 - Rotate `GATEWAY_API_KEY` any time with `wrangler secret put GATEWAY_API_KEY` followed
   by a redeploy; omit it entirely to require no auth (not recommended in production).
+- Rotate `CONSOLE_PASSWORD` the same way if you suspect it leaked; sessions are
+  signed with a key derived from the password, so rotating it invalidates existing
+  console sessions immediately.
